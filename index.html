@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>中國象棋 - Kobo</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #fff; color: #000; font-family: sans-serif; text-align: center; -webkit-user-select: none; user-select: none; }
+#status { font-size: 18px; padding: 8px 0; min-height: 36px; font-weight: bold; }
+#board-wrap { display: inline-block; position: relative; margin: 0 auto; }
+#board { display: inline-grid; position: relative; }
+.cell { position: relative; width: 100%; height: 100%; display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; -webkit-justify-content: center; justify-content: center; cursor: pointer; z-index: 1; }
+.cell.selected { background: #aaa; }
+.cell.last-move { outline: 3px solid #000; outline-offset: -3px; }
+.cell.legal-empty::after { content: ''; position: absolute; width: 12px; height: 12px; background: #555; border-radius: 50%; }
+.cell.legal-capture { outline: 3px solid #555; outline-offset: -3px; }
+.piece { width: 90%; height: 90%; border-radius: 50%; border: 2px solid; display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; -webkit-justify-content: center; justify-content: center; font-size: 16px; font-weight: bold; background: #fff; z-index: 2; }
+.piece.red { color: #cc0000; border-color: #cc0000; }
+.piece.black { color: #000; border-color: #000; }
+#river { position: absolute; left: 0; right: 0; display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; -webkit-justify-content: center; justify-content: center; z-index: 0; pointer-events: none; }
+#river span { font-size: 18px; color: #000; padding: 0 20px; }
+#controls { padding: 8px 0; display: -webkit-flex; display: flex; -webkit-flex-wrap: wrap; flex-wrap: wrap; -webkit-justify-content: center; justify-content: center; gap: 6px; }
+#controls button { font-size: 14px; padding: 6px 14px; background: #fff; border: 2px solid #000; cursor: pointer; }
+#controls button.active { background: #000; color: #fff; }
+canvas#grid-canvas { position: absolute; top: 0; left: 0; z-index: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div id="status">輪到 紅方</div>
+<div id="board-wrap">
+  <canvas id="grid-canvas"></canvas>
+  <div id="board"></div>
+  <div id="river"><span>楚 河</span><span>漢 界</span></div>
+</div>
+<div id="controls">
+  <button id="btn-new" onclick="newGame()">新局</button>
+  <button id="btn-undo" onclick="undoMove()">悔棋</button>
+  <button id="btn-ai" onclick="toggleAI()">AI: 開</button>
+  <button id="btn-diff" onclick="cycleDifficulty()">難度: 2</button>
+</div>
+
+<script>
+(function() {
+  /* ========== CONSTANTS ========== */
+  var COLS = 9;
+  var ROWS = 10;
+  var TOTAL = 90;
+
+  var PIECE_NAMES = {
+    1: '兵', 2: '炮', 3: '車', 4: '馬', 5: '相', 6: '仕', 7: '帥',
+    '-1': '卒', '-2': '砲', '-3': '車', '-4': '馬', '-5': '象', '-6': '士', '-7': '將'
+  };
+
+  var PIECE_VALUES = { 1: 100, 2: 400, 3: 900, 4: 400, 5: 200, 6: 200, 7: 20000 };
+
+  /* Position bonus tables (10 rows x 9 cols, red perspective from bottom) */
+  /* For black, mirror vertically and negate */
+  var PST = {};
+  PST[1] = [ /* 兵 - pawn */
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  2,  4,  2,  0,  0,  0,
+    2,  4,  6, 10, 12, 10,  6,  4,  2,
+    6, 12, 18, 30, 32, 30, 18, 12,  6,
+   10, 20, 30, 40, 42, 40, 30, 20, 10,
+   20, 30, 40, 50, 52, 50, 40, 30, 20,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0
+  ];
+  PST[2] = [ /* 炮 - cannon */
+    0,  0,  2,  4,  4,  4,  2,  0,  0,
+    0,  0,  2,  4,  6,  4,  2,  0,  0,
+    0,  0,  2,  4,  6,  4,  2,  0,  0,
+    0,  0,  2,  6,  8,  6,  2,  0,  0,
+    0,  0,  4,  8, 10,  8,  4,  0,  0,
+    0,  0,  4,  8, 10,  8,  4,  0,  0,
+    0,  0,  2,  6,  8,  6,  2,  0,  0,
+    0,  2,  4,  6,  6,  6,  4,  2,  0,
+    2,  4,  4,  4,  4,  4,  4,  4,  2,
+    0,  2,  2,  4,  4,  4,  2,  2,  0
+  ];
+  PST[3] = [ /* 車 - rook */
+    0,  2,  4,  6,  8,  6,  4,  2,  0,
+    2,  4,  6,  8, 12,  8,  6,  4,  2,
+    2,  4,  6,  8, 10,  8,  6,  4,  2,
+    2,  4,  6,  8, 10,  8,  6,  4,  2,
+    4,  6,  8, 10, 12, 10,  8,  6,  4,
+    4,  6,  8, 10, 12, 10,  8,  6,  4,
+    4,  6,  8, 10, 12, 10,  8,  6,  4,
+    4,  6,  8, 10, 12, 10,  8,  6,  4,
+    4,  6,  8, 10, 14, 10,  8,  6,  4,
+    2,  4,  6, 10, 14, 10,  6,  4,  2
+  ];
+  PST[4] = [ /* 馬 - knight */
+    0,  2,  4,  2,  0,  2,  4,  2,  0,
+    2,  8, 12, 12, 10, 12, 12,  8,  2,
+    4, 10, 16, 18, 16, 18, 16, 10,  4,
+    2, 12, 16, 20, 20, 20, 16, 12,  2,
+    0, 12, 18, 22, 24, 22, 18, 12,  0,
+    0, 12, 18, 22, 24, 22, 18, 12,  0,
+    2, 12, 16, 20, 20, 20, 16, 12,  2,
+    2, 10, 14, 16, 16, 16, 14, 10,  2,
+    0,  6, 10, 10,  8, 10, 10,  6,  0,
+    0,  2,  4,  4,  4,  4,  4,  2,  0
+  ];
+  PST[5] = [ /* 相 - bishop */
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  4,  0,  0,  0,  4,  0,  0,
+    0,  0,  0,  0,  4,  0,  0,  0,  0,
+    0,  2,  0,  0,  0,  0,  0,  2,  0,
+    0,  0,  0,  0,  2,  0,  0,  0,  0,
+    0,  0,  2,  0,  0,  0,  2,  0,  0
+  ];
+  PST[6] = [ /* 仕 - advisor */
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  2,  0,  2,  0,  0,  0,
+    0,  0,  0,  0,  4,  0,  0,  0,  0,
+    0,  0,  0,  2,  0,  2,  0,  0,  0
+  ];
+  PST[7] = [ /* 帥 - king */
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  2,  0,  0,  0,  0,
+    0,  0,  0,  2,  4,  2,  0,  0,  0,
+    0,  0,  0,  0,  2,  0,  0,  0,  0
+  ];
+
+  /* ========== GAME STATE ========== */
+  var board = [];
+  var turn = 1; /* 1 = red, -1 = black */
+  var selected = -1;
+  var legalForSelected = [];
+  var lastMove = null; /* {from, to} */
+  var history = []; /* [{board, turn, lastMove}] */
+  var aiEnabled = true;
+  var aiDepth = 2;
+  var gameOver = false;
+
+  /* ========== BOARD HELPERS ========== */
+  function rowOf(idx) { return Math.floor(idx / 9); }
+  function colOf(idx) { return idx % 9; }
+  function idxOf(r, c) { return r * 9 + c; }
+  function inBounds(r, c) { return r >= 0 && r < 10 && c >= 0 && c < 9; }
+  function sign(v) { return v > 0 ? 1 : (v < 0 ? -1 : 0); }
+  function absVal(v) { return v < 0 ? -v : v; }
+
+  function copyBoard(b) {
+    var n = [];
+    for (var i = 0; i < TOTAL; i++) n[i] = b[i];
+    return n;
+  }
+
+  /* ========== INITIAL POSITION ========== */
+  function initBoard() {
+    var b = [];
+    var i;
+    for (i = 0; i < TOTAL; i++) b[i] = 0;
+    /* Black (negative) rows 0-4, Red (positive) rows 5-9 */
+    /* Row 0: black back rank */
+    b[idxOf(0,0)] = -3; b[idxOf(0,1)] = -4; b[idxOf(0,2)] = -5;
+    b[idxOf(0,3)] = -6; b[idxOf(0,4)] = -7; b[idxOf(0,5)] = -6;
+    b[idxOf(0,6)] = -5; b[idxOf(0,7)] = -4; b[idxOf(0,8)] = -3;
+    /* Row 2: black cannons */
+    b[idxOf(2,1)] = -2; b[idxOf(2,7)] = -2;
+    /* Row 3: black pawns */
+    b[idxOf(3,0)] = -1; b[idxOf(3,2)] = -1; b[idxOf(3,4)] = -1;
+    b[idxOf(3,6)] = -1; b[idxOf(3,8)] = -1;
+    /* Row 9: red back rank */
+    b[idxOf(9,0)] = 3; b[idxOf(9,1)] = 4; b[idxOf(9,2)] = 5;
+    b[idxOf(9,3)] = 6; b[idxOf(9,4)] = 7; b[idxOf(9,5)] = 6;
+    b[idxOf(9,6)] = 5; b[idxOf(9,7)] = 4; b[idxOf(9,8)] = 3;
+    /* Row 7: red cannons */
+    b[idxOf(7,1)] = 2; b[idxOf(7,7)] = 2;
+    /* Row 6: red pawns */
+    b[idxOf(6,0)] = 1; b[idxOf(6,2)] = 1; b[idxOf(6,4)] = 1;
+    b[idxOf(6,6)] = 1; b[idxOf(6,8)] = 1;
+    return b;
+  }
+
+  /* ========== MOVE GENERATION ========== */
+  function pseudoMoves(b, side) {
+    var moves = [];
+    var i, r, c, p, ap, dr, dc, nr, nc, tr, tc, j, cnt;
+    var dirs4 = [[0,1],[0,-1],[1,0],[-1,0]];
+    var diagDirs = [[1,1],[1,-1],[-1,1],[-1,-1]];
+
+    for (i = 0; i < TOTAL; i++) {
+      p = b[i];
+      if (p === 0) continue;
+      if (sign(p) !== side) continue;
+      ap = absVal(p);
+      r = rowOf(i);
+      c = colOf(i);
+
+      if (ap === 7) {
+        /* 將/帥: one step in 4 dirs within palace */
+        for (j = 0; j < 4; j++) {
+          nr = r + dirs4[j][0]; nc = c + dirs4[j][1];
+          if (!inBounds(nr, nc)) continue;
+          if (nc < 3 || nc > 5) continue;
+          if (side === 1 && (nr < 7 || nr > 9)) continue;
+          if (side === -1 && (nr < 0 || nr > 2)) continue;
+          if (b[idxOf(nr, nc)] !== 0 && sign(b[idxOf(nr, nc)]) === side) continue;
+          moves.push({from: i, to: idxOf(nr, nc)});
+        }
+      } else if (ap === 6) {
+        /* 仕/士: one step diagonally within palace */
+        for (j = 0; j < 4; j++) {
+          nr = r + diagDirs[j][0]; nc = c + diagDirs[j][1];
+          if (!inBounds(nr, nc)) continue;
+          if (nc < 3 || nc > 5) continue;
+          if (side === 1 && (nr < 7 || nr > 9)) continue;
+          if (side === -1 && (nr < 0 || nr > 2)) continue;
+          if (b[idxOf(nr, nc)] !== 0 && sign(b[idxOf(nr, nc)]) === side) continue;
+          moves.push({from: i, to: idxOf(nr, nc)});
+        }
+      } else if (ap === 5) {
+        /* 相/象: diagonal 2 steps, check blocking eye, no crossing river */
+        for (j = 0; j < 4; j++) {
+          dr = diagDirs[j][0]; dc = diagDirs[j][1];
+          nr = r + 2 * dr; nc = c + 2 * dc;
+          if (!inBounds(nr, nc)) continue;
+          /* Cannot cross river */
+          if (side === 1 && nr < 5) continue;
+          if (side === -1 && nr > 4) continue;
+          /* Blocking eye */
+          if (b[idxOf(r + dr, c + dc)] !== 0) continue;
+          if (b[idxOf(nr, nc)] !== 0 && sign(b[idxOf(nr, nc)]) === side) continue;
+          moves.push({from: i, to: idxOf(nr, nc)});
+        }
+      } else if (ap === 4) {
+        /* 馬: L-shape with leg blocking */
+        var knightMoves = [
+          [-2, -1, -1, 0], [-2, 1, -1, 0],
+          [2, -1, 1, 0], [2, 1, 1, 0],
+          [-1, -2, 0, -1], [-1, 2, 0, 1],
+          [1, -2, 0, -1], [1, 2, 0, 1]
+        ];
+        for (j = 0; j < 8; j++) {
+          nr = r + knightMoves[j][0]; nc = c + knightMoves[j][1];
+          tr = r + knightMoves[j][2]; tc = c + knightMoves[j][3];
+          if (!inBounds(nr, nc)) continue;
+          /* Blocking leg */
+          if (b[idxOf(tr, tc)] !== 0) continue;
+          if (b[idxOf(nr, nc)] !== 0 && sign(b[idxOf(nr, nc)]) === side) continue;
+          moves.push({from: i, to: idxOf(nr, nc)});
+        }
+      } else if (ap === 3) {
+        /* 車: slide in 4 dirs */
+        for (j = 0; j < 4; j++) {
+          dr = dirs4[j][0]; dc = dirs4[j][1];
+          nr = r + dr; nc = c + dc;
+          while (inBounds(nr, nc)) {
+            var target = b[idxOf(nr, nc)];
+            if (target === 0) {
+              moves.push({from: i, to: idxOf(nr, nc)});
+            } else {
+              if (sign(target) !== side) {
+                moves.push({from: i, to: idxOf(nr, nc)});
+              }
+              break;
+            }
+            nr += dr; nc += dc;
+          }
+        }
+      } else if (ap === 2) {
+        /* 炮: slide to move, jump one to capture */
+        for (j = 0; j < 4; j++) {
+          dr = dirs4[j][0]; dc = dirs4[j][1];
+          nr = r + dr; nc = c + dc;
+          cnt = 0;
+          while (inBounds(nr, nc)) {
+            var tgt = b[idxOf(nr, nc)];
+            if (cnt === 0) {
+              if (tgt === 0) {
+                moves.push({from: i, to: idxOf(nr, nc)});
+              } else {
+                cnt = 1;
+              }
+            } else {
+              /* cnt === 1: found platform, looking for capture */
+              if (tgt !== 0) {
+                if (sign(tgt) !== side) {
+                  moves.push({from: i, to: idxOf(nr, nc)});
+                }
+                break;
+              }
+            }
+            nr += dr; nc += dc;
+          }
+        }
+      } else if (ap === 1) {
+        /* 兵/卒: forward, after crossing river also left/right */
+        var forward = (side === 1) ? -1 : 1;
+        var crossedRiver = (side === 1) ? (r <= 4) : (r >= 5);
+        /* Forward */
+        nr = r + forward; nc = c;
+        if (inBounds(nr, nc)) {
+          if (b[idxOf(nr, nc)] === 0 || sign(b[idxOf(nr, nc)]) !== side) {
+            moves.push({from: i, to: idxOf(nr, nc)});
+          }
+        }
+        /* Sideways after crossing */
+        if (crossedRiver) {
+          var sideDirs = [[0, -1], [0, 1]];
+          for (j = 0; j < 2; j++) {
+            nr = r; nc = c + sideDirs[j][1];
+            if (inBounds(nr, nc)) {
+              if (b[idxOf(nr, nc)] === 0 || sign(b[idxOf(nr, nc)]) !== side) {
+                moves.push({from: i, to: idxOf(nr, nc)});
+              }
+            }
+          }
+        }
+      }
+    }
+    return moves;
+  }
+
+  function applyMove(b, move) {
+    var nb = copyBoard(b);
+    nb[move.to] = nb[move.from];
+    nb[move.from] = 0;
+    return nb;
+  }
+
+  function findKing(b, side) {
+    var target = side === 1 ? 7 : -7;
+    for (var i = 0; i < TOTAL; i++) {
+      if (b[i] === target) return i;
+    }
+    return -1;
+  }
+
+  /* Flying general: two kings face each other on same column with nothing between */
+  function flyingGeneralCheck(b) {
+    var rk = findKing(b, 1);
+    var bk = findKing(b, -1);
+    if (rk === -1 || bk === -1) return true;
+    if (colOf(rk) !== colOf(bk)) return false;
+    var col = colOf(rk);
+    var minR = rowOf(bk);
+    var maxR = rowOf(rk);
+    for (var r = minR + 1; r < maxR; r++) {
+      if (b[idxOf(r, col)] !== 0) return false;
+    }
+    return true;
+  }
+
+  function inCheck(b, side) {
+    var kpos = findKing(b, side);
+    if (kpos === -1) return true;
+    var opp = -side;
+    var oppMoves = pseudoMoves(b, opp);
+    for (var i = 0; i < oppMoves.length; i++) {
+      if (oppMoves[i].to === kpos) return true;
+    }
+    return false;
+  }
+
+  function legalMoves(b, side) {
+    var pmoves = pseudoMoves(b, side);
+    var legal = [];
+    for (var i = 0; i < pmoves.length; i++) {
+      var nb = applyMove(b, pmoves[i]);
+      /* After move, own king must not be in check, and no flying general */
+      if (!inCheck(nb, side) && !flyingGeneralCheck(nb)) {
+        legal.push(pmoves[i]);
+      }
+    }
+    return legal;
+  }
+
+  /* ========== EVALUATION ========== */
+  function evaluate(b) {
+    var score = 0;
+    var i, p, ap, s;
+    for (i = 0; i < TOTAL; i++) {
+      p = b[i];
+      if (p === 0) continue;
+      ap = absVal(p);
+      s = sign(p);
+      var val = PIECE_VALUES[ap] || 0;
+      /* Position bonus */
+      var pst = PST[ap];
+      if (pst) {
+        if (s === 1) {
+          /* Red: table is already from red perspective (row 0=top, row 9=bottom) */
+          val += pst[i];
+        } else {
+          /* Black: mirror vertically */
+          var mr = 9 - rowOf(i);
+          var mc = colOf(i);
+          val += pst[idxOf(mr, mc)];
+        }
+      }
+      score += s * val;
+    }
+    return score;
+  }
+
+  /* ========== MINIMAX WITH ALPHA-BETA ========== */
+  function minimax(b, depth, alpha, beta, side) {
+    if (depth === 0) return evaluate(b);
+
+    var moves = legalMoves(b, side);
+    if (moves.length === 0) {
+      /* No legal moves: checkmate or stalemate */
+      if (inCheck(b, side)) {
+        return side === 1 ? -100000 + (10 - depth) : 100000 - (10 - depth);
+      }
+      return 0; /* Stalemate */
+    }
+
+    /* Simple move ordering: captures first */
+    moves.sort(function(a, mB) {
+      var va = b[a.to] !== 0 ? 1 : 0;
+      var vb = b[mB.to] !== 0 ? 1 : 0;
+      return vb - va;
+    });
+
+    var i, nb, val;
+    if (side === 1) {
+      /* Maximizing */
+      val = -999999;
+      for (i = 0; i < moves.length; i++) {
+        nb = applyMove(b, moves[i]);
+        var s = minimax(nb, depth - 1, alpha, beta, -1);
+        if (s > val) val = s;
+        if (val > alpha) alpha = val;
+        if (alpha >= beta) break;
+      }
+      return val;
+    } else {
+      /* Minimizing */
+      val = 999999;
+      for (i = 0; i < moves.length; i++) {
+        nb = applyMove(b, moves[i]);
+        var s2 = minimax(nb, depth - 1, alpha, beta, 1);
+        if (s2 < val) val = s2;
+        if (val < beta) beta = val;
+        if (alpha >= beta) break;
+      }
+      return val;
+    }
+  }
+
+  function aiBestMove(b, side, depth) {
+    var moves = legalMoves(b, side);
+    if (moves.length === 0) return null;
+
+    /* Shuffle to add variety */
+    var i, j, tmp;
+    for (i = moves.length - 1; i > 0; i--) {
+      j = Math.floor(Math.random() * (i + 1));
+      tmp = moves[i]; moves[i] = moves[j]; moves[j] = tmp;
+    }
+
+    /* Captures first for better pruning */
+    moves.sort(function(a, mB) {
+      var va = b[a.to] !== 0 ? absVal(b[a.to]) : 0;
+      var vb = b[mB.to] !== 0 ? absVal(b[mB.to]) : 0;
+      return vb - va;
+    });
+
+    var best = null;
+    var bestScore = side === 1 ? -999999 : 999999;
+
+    for (i = 0; i < moves.length; i++) {
+      var nb = applyMove(b, moves[i]);
+      var sc = minimax(nb, depth - 1, -999999, 999999, -side);
+      if (side === 1) {
+        if (sc > bestScore) { bestScore = sc; best = moves[i]; }
+      } else {
+        if (sc < bestScore) { bestScore = sc; best = moves[i]; }
+      }
+    }
+    return best;
+  }
+
+  /* ========== UI RENDERING ========== */
+  var boardEl = document.getElementById('board');
+  var statusEl = document.getElementById('status');
+  var riverEl = document.getElementById('river');
+  var canvasEl = document.getElementById('grid-canvas');
+  var boardWrap = document.getElementById('board-wrap');
+  var cellSize = 0;
+
+  function calcCellSize() {
+    var maxW = Math.min(window.innerWidth - 16, 450);
+    cellSize = Math.floor(maxW / COLS);
+    return cellSize;
+  }
+
+  function drawGridLines() {
+    var cs = cellSize;
+    var w = cs * COLS;
+    var h = cs * ROWS;
+    canvasEl.width = w;
+    canvasEl.height = h;
+    var ctx = canvasEl.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+
+    var halfCS = Math.floor(cs / 2);
+    var r, c, x, y;
+
+    /* Horizontal lines */
+    for (r = 0; r < ROWS; r++) {
+      y = r * cs + halfCS;
+      ctx.beginPath();
+      ctx.moveTo(halfCS, y);
+      ctx.lineTo((COLS - 1) * cs + halfCS, y);
+      ctx.stroke();
+    }
+
+    /* Vertical lines - split at river */
+    for (c = 0; c < COLS; c++) {
+      x = c * cs + halfCS;
+      /* Top half: rows 0-4 */
+      ctx.beginPath();
+      ctx.moveTo(x, halfCS);
+      ctx.lineTo(x, 4 * cs + halfCS);
+      ctx.stroke();
+      /* Bottom half: rows 5-9 */
+      ctx.beginPath();
+      ctx.moveTo(x, 5 * cs + halfCS);
+      ctx.lineTo(x, 9 * cs + halfCS);
+      ctx.stroke();
+    }
+    /* Left and right border through river */
+    ctx.beginPath();
+    ctx.moveTo(halfCS, 4 * cs + halfCS);
+    ctx.lineTo(halfCS, 5 * cs + halfCS);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(8 * cs + halfCS, 4 * cs + halfCS);
+    ctx.lineTo(8 * cs + halfCS, 5 * cs + halfCS);
+    ctx.stroke();
+
+    /* Palace diagonals - top */
+    ctx.beginPath();
+    ctx.moveTo(3 * cs + halfCS, halfCS);
+    ctx.lineTo(5 * cs + halfCS, 2 * cs + halfCS);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(5 * cs + halfCS, halfCS);
+    ctx.lineTo(3 * cs + halfCS, 2 * cs + halfCS);
+    ctx.stroke();
+
+    /* Palace diagonals - bottom */
+    ctx.beginPath();
+    ctx.moveTo(3 * cs + halfCS, 7 * cs + halfCS);
+    ctx.lineTo(5 * cs + halfCS, 9 * cs + halfCS);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(5 * cs + halfCS, 7 * cs + halfCS);
+    ctx.lineTo(3 * cs + halfCS, 9 * cs + halfCS);
+    ctx.stroke();
+  }
+
+  function renderBoard() {
+    var cs = calcCellSize();
+    var w = cs * COLS;
+    var h = cs * ROWS;
+
+    boardEl.style.gridTemplateColumns = 'repeat(' + COLS + ', ' + cs + 'px)';
+    boardEl.style.gridTemplateRows = 'repeat(' + ROWS + ', ' + cs + 'px)';
+    boardEl.style.width = w + 'px';
+    boardEl.style.height = h + 'px';
+    boardWrap.style.width = w + 'px';
+
+    /* River position */
+    riverEl.style.top = (4 * cs + Math.floor(cs / 2)) + 'px';
+    riverEl.style.height = cs + 'px';
+
+    drawGridLines();
+
+    /* Compute legal target set */
+    var legalSet = {};
+    for (var k = 0; k < legalForSelected.length; k++) {
+      legalSet[legalForSelected[k].to] = true;
+    }
+
+    boardEl.innerHTML = '';
+    for (var i = 0; i < TOTAL; i++) {
+      var cell = document.createElement('div');
+      cell.className = 'cell';
+      cell.setAttribute('data-idx', i);
+
+      if (i === selected) cell.className += ' selected';
+      if (lastMove && (i === lastMove.from || i === lastMove.to)) {
+        cell.className += ' last-move';
+      }
+      if (legalSet[i]) {
+        if (board[i] === 0) {
+          cell.className += ' legal-empty';
+        } else {
+          cell.className += ' legal-capture';
+        }
+      }
+
+      if (board[i] !== 0) {
+        var piece = document.createElement('div');
+        piece.className = 'piece ' + (board[i] > 0 ? 'red' : 'black');
+        var fontSize = Math.max(12, Math.floor(cs * 0.48));
+        piece.style.fontSize = fontSize + 'px';
+        piece.innerHTML = PIECE_NAMES[board[i]] || '';
+        cell.appendChild(piece);
+      }
+
+      cell.addEventListener('click', (function(idx) {
+        return function() { onCellClick(idx); };
+      })(i));
+
+      boardEl.appendChild(cell);
+    }
+  }
+
+  function updateStatus() {
+    var msg = '';
+    if (gameOver) {
+      statusEl.innerHTML = gameOver;
+      return;
+    }
+    var sideName = turn === 1 ? '紅方' : '黑方';
+    if (inCheck(board, turn)) {
+      msg = sideName + ' 被將！';
+    } else {
+      msg = '輪到 ' + sideName;
+    }
+    statusEl.innerHTML = msg;
+  }
+
+  /* ========== USER INTERACTION ========== */
+  function onCellClick(idx) {
+    if (gameOver) return;
+    if (aiEnabled && turn === -1) return; /* AI's turn */
+
+    var p = board[idx];
+
+    if (selected >= 0) {
+      /* Check if clicking a legal target */
+      var isLegal = false;
+      for (var i = 0; i < legalForSelected.length; i++) {
+        if (legalForSelected[i].to === idx) { isLegal = true; break; }
+      }
+      if (isLegal) {
+        doMove({from: selected, to: idx});
+        selected = -1;
+        legalForSelected = [];
+        renderBoard();
+        updateStatus();
+        checkGameEnd();
+        if (!gameOver && aiEnabled && turn === -1) {
+          triggerAI();
+        }
+        return;
+      }
+    }
+
+    /* Select own piece */
+    if (p !== 0 && sign(p) === turn) {
+      selected = idx;
+      var allLegal = legalMoves(board, turn);
+      legalForSelected = [];
+      for (var j = 0; j < allLegal.length; j++) {
+        if (allLegal[j].from === idx) legalForSelected.push(allLegal[j]);
+      }
+      renderBoard();
+      return;
+    }
+
+    /* Deselect */
+    selected = -1;
+    legalForSelected = [];
+    renderBoard();
+  }
+
+  function doMove(move) {
+    history.push({board: copyBoard(board), turn: turn, lastMove: lastMove});
+    board = applyMove(board, move);
+    lastMove = {from: move.from, to: move.to};
+    turn = -turn;
+  }
+
+  function checkGameEnd() {
+    if (gameOver) return;
+    var moves = legalMoves(board, turn);
+    if (moves.length === 0) {
+      if (inCheck(board, turn)) {
+        gameOver = (turn === 1) ? '黑方 勝！' : '紅方 勝！';
+      } else {
+        gameOver = '和局！';
+      }
+      updateStatus();
+    }
+  }
+
+  function triggerAI() {
+    statusEl.innerHTML = 'AI 思考中…';
+    setTimeout(function() {
+      var move = aiBestMove(board, -1, aiDepth);
+      if (move) {
+        doMove(move);
+      }
+      selected = -1;
+      legalForSelected = [];
+      renderBoard();
+      updateStatus();
+      checkGameEnd();
+    }, 50);
+  }
+
+  /* ========== CONTROLS ========== */
+  window.newGame = function() {
+    board = initBoard();
+    turn = 1;
+    selected = -1;
+    legalForSelected = [];
+    lastMove = null;
+    history = [];
+    gameOver = false;
+    renderBoard();
+    updateStatus();
+  };
+
+  window.undoMove = function() {
+    if (history.length === 0) return;
+    /* Undo AI move + player move */
+    if (aiEnabled && history.length >= 2) {
+      var st = history.pop(); /* Undo AI */
+      st = history.pop(); /* Undo player */
+      board = st.board;
+      turn = st.turn;
+      lastMove = st.lastMove;
+    } else if (history.length >= 1) {
+      var st2 = history.pop();
+      board = st2.board;
+      turn = st2.turn;
+      lastMove = st2.lastMove;
+    }
+    selected = -1;
+    legalForSelected = [];
+    gameOver = false;
+    renderBoard();
+    updateStatus();
+  };
+
+  window.toggleAI = function() {
+    aiEnabled = !aiEnabled;
+    document.getElementById('btn-ai').innerHTML = 'AI: ' + (aiEnabled ? '開' : '關');
+    if (aiEnabled) {
+      document.getElementById('btn-ai').className = 'active';
+    } else {
+      document.getElementById('btn-ai').className = '';
+    }
+    if (aiEnabled && turn === -1 && !gameOver) {
+      triggerAI();
+    }
+  };
+
+  window.cycleDifficulty = function() {
+    aiDepth = (aiDepth % 3) + 1;
+    document.getElementById('btn-diff').innerHTML = '難度: ' + aiDepth;
+  };
+
+  /* ========== INIT ========== */
+  board = initBoard();
+  document.getElementById('btn-ai').className = 'active';
+  renderBoard();
+  updateStatus();
+
+  /* Re-render on resize */
+  window.addEventListener('resize', function() {
+    renderBoard();
+  });
+})();
+</script>
+</body>
+</html>
